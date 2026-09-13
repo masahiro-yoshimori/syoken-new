@@ -1,0 +1,658 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  Sparkles, 
+  Copy, 
+  Check, 
+  BookOpen, 
+  RefreshCw, 
+  Sliders, 
+  User, 
+  Lightbulb, 
+  PenTool, 
+  HelpCircle, 
+  Trash2, 
+  Plus, 
+  ArrowRight,
+  Edit3,
+  Award,
+  AlertCircle
+} from 'lucide-react';
+
+const apiKey = ""; // 実行環境から提供されます
+
+// リフレーミング辞書データ（教員向けヒント）
+const REFRAMING_TIPS = [
+  { negative: "落ち着きがない・集中が切れる", positive: "好奇心旺盛で行動力がある／次のステップへ積極的に関心を広げられる" },
+  { negative: "自己主張が苦手・内気", positive: "周囲の意見をよく聞き調和を重んじる／慎重に考えてから丁寧に行動できる" },
+  { negative: "提出物が遅れがち", positive: "丁寧に取り組もうとする姿勢が見られる／計画性を身につけることでさらに力を発揮できる" },
+  { negative: "自分の意見を押し通そうとする", positive: "リーダーシップがあり意志が強い／相手の立場を汲み取ることでより良い協力関係が築ける" },
+  { negative: "失敗を極度に恐れる", positive: "責任感が強く真面目に取り組む／挑戦を重ねることで更なる自信につながる" },
+  { negative: "発表や発言が少ない", positive: "物事を深く掘り下げてじっくり考える力がある／考えを言葉にする経験を積むことで表現力が伸びる" },
+  { negative: "頑固・切り替えが遅い", positive: "こだわりと粘り強さがある／柔軟な視点を取り入れることで多角的な成長が期待できる" },
+  { negative: "ケアレスミスが多い", positive: "作業スピードが速く意欲的／見直しの習慣をつけることで正確性が一層高まる" },
+];
+
+// クイック入力用タグ
+const PRESET_TAGS = {
+  positive: [
+    "周囲への細やかな気配り",
+    "係・委員会活動への責任感",
+    "粘り強い探究心と学習意欲",
+    "行事でのリーダーシップ",
+    "班活動での協調性と傾聴力",
+    "誰にでも明るく挨拶ができる",
+    "自ら進んで清掃や係の仕事を行う",
+    "部活動での地道な努力"
+  ],
+  encouragement: [
+    "計画的な学習習慣の定着",
+    "自分の意見を堂々と伝える勇気",
+    "見直しによる正確性の向上",
+    "周囲を巻き込むリーダーシップの発揮",
+    "失敗を恐れず新たな課題へ挑戦する姿勢",
+    "時間配分を意識した行動"
+  ]
+};
+
+export default function App() {
+  // フォーム状態
+  const [grade, setGrade] = useState("2");
+  const [category, setCategory] = useState("委員会活動");
+  const [customCategory, setCustomCategory] = useState("");
+  const [positivePoint, setPositivePoint] = useState("");
+  const [encouragementPoint, setEncouragementPoint] = useState("");
+  const [episode, setEpisode] = useState("");
+  const [targetCharCount, setTargetCharCount] = useState(200);
+
+  // 出力・UI状態
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [results, setResults] = useState(null);
+  const [copiedIndex, setCopiedIndex] = useState(null);
+  const [errorMessage, setErrorMessage] = useState("");
+  const [showDictionary, setShowDictionary] = useState(false);
+  const [activeTab, setActiveTab] = useState("generator"); // 'generator' | 'dictionary'
+
+  // クリップボードコピー関数（iFrame制約対応）
+  const handleCopy = (text, index) => {
+    const textArea = document.createElement("textarea");
+    textArea.value = text;
+    textArea.style.position = "fixed";
+    textArea.style.left = "-999999px";
+    textArea.style.top = "-999999px";
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    try {
+      document.execCommand('copy');
+      setCopiedIndex(index);
+      setTimeout(() => setCopiedIndex(null), 2000);
+    } catch (err) {
+      console.error('Copy failed', err);
+    }
+    document.body.removeChild(textArea);
+  };
+
+  // プリセットタグの追加
+  const addTag = (field, tagText) => {
+    if (field === 'positive') {
+      setPositivePoint(prev => prev ? `${prev}、${tagText}` : tagText);
+    } else if (field === 'encouragement') {
+      setEncouragementPoint(prev => prev ? `${prev}、${tagText}` : tagText);
+    }
+  };
+
+  // 入力リセット
+  const handleReset = () => {
+    setPositivePoint("");
+    setEncouragementPoint("");
+    setEpisode("");
+    setCustomCategory("");
+    setResults(null);
+    setErrorMessage("");
+  };
+
+  // APIリクエスト（指数バックオフ付き）
+  const callGeminiWithRetry = async (payload, maxRetries = 5) => {
+    let delay = 1000;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          }
+        );
+
+        if (response.ok) {
+          return await response.json();
+        }
+      } catch (error) {
+        // エラー時は待機して再試行
+      }
+      await new Promise(resolve => setTimeout(resolve, delay));
+      delay *= 2;
+    }
+    throw new Error("生成に失敗しました。時間をおいて再度お試しください。");
+  };
+
+  // AI所見生成
+  const handleGenerate = async () => {
+    if (!positivePoint.trim() && !encouragementPoint.trim() && !episode.trim()) {
+      setErrorMessage("プラス面、課題面、具体的なエピソードのいずれかを入力してください。");
+      return;
+    }
+
+    setIsGenerating(true);
+    setErrorMessage("");
+
+    const actualCategory = category === "その他" && customCategory ? customCategory : category;
+
+    const systemPrompt = `あなたは思慮深く生徒想いな中学校のベテラン教員です。
+中学校の通知表（指導要録・通知票）の「総合所見」欄に記載する文章を作成してください。
+
+# 重要な作成ルール:
+1. 文体: 必ず自然で温かみのある「です・ます」調で統一してください。
+2. 文字数: 各パターン【${targetCharCount}文字程度（±20文字以内）】で作成してください。
+3. トーン: 生徒の自己肯定感を高め、保護者にも安心感と今後の期待が伝わる温かい表現にしてください。
+4. ポジティブ変換（リフレーミング）: 課題点や直してほしい面も、否定形（〜できない、〜が不足している）は使わず、「〜することでさらに良くなる」「〜への挑戦を期待しています」といった前向き・建設的な表現に言い換えてください。
+5. 多様性: 以下の異なる切り口で3パターン提案してください。
+   - パターン1【バランス型】: 日頃の良さと今後の成長課題を自然な流れで調和させた標準的な所見。
+   - パターン2【行動・主体性重視型】: 具体的な活動・エピソードと本人の意欲・行動力を前面に出した所見。
+   - パターン3【成長支援・ステップアップ型】: 今後の伸びしろや次の学年・学期への期待と励ましを中心に据えた所見。`;
+
+    const userPrompt = `【生徒情報】
+- 学年: 中学${grade}年生
+- 重点活動/対象: ${actualCategory}
+- プラス面（評価したい点）: ${positivePoint || "特になし（全体的な真面目さを評価）"}
+- 課題面（励ましたい点）: ${encouragementPoint || "現状の取り組みを継続すること"}
+- 具体的なエピソード: ${episode || "日頃の活動を通じて"}
+
+上記の条件に基づき、3パターンの所見を作成してください。`;
+
+    const payload = {
+      contents: [{ parts: [{ text: userPrompt }] }],
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "OBJECT",
+          properties: {
+            patterns: {
+              type: "ARRAY",
+              items: {
+                type: "OBJECT",
+                properties: {
+                  type: { type: "STRING", description: "例: バランス型, 行動・主体性重視型, 成長支援型" },
+                  subtitle: { type: "STRING", description: "このパターンの特徴の簡潔な説明" },
+                  text: { type: "STRING", description: "通知表所見本文" }
+                },
+                required: ["type", "subtitle", "text"]
+              }
+            }
+          },
+          required: ["patterns"]
+        }
+      }
+    };
+
+    try {
+      const data = await callGeminiWithRetry(payload);
+      const contentText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (contentText) {
+        const parsed = JSON.parse(contentText);
+        setResults(parsed.patterns || []);
+      } else {
+        throw new Error("生成結果の取得に失敗しました。");
+      }
+    } catch (err) {
+      setErrorMessage(err.message || "エラーが発生しました。");
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  // 生成結果のテキスト直接編集
+  const handleTextChange = (index, newText) => {
+    if (!results) return;
+    const updated = [...results];
+    updated[index].text = newText;
+    setResults(updated);
+  };
+
+  // AIによる微調整（短縮 / 丁寧化など）
+  const handleRefine = async (index, action) => {
+    if (!results || !results[index]) return;
+    const currentText = results[index].text;
+
+    let instruction = "";
+    if (action === "shorten") instruction = `文字数を少し削り、約${targetCharCount - 30}文字程度に簡潔にまとめてください。`;
+    if (action === "expand") instruction = `より情景が浮かぶよう具体性を少し加え、約${targetCharCount + 30}文字程度に拡充してください。`;
+    if (action === "soften") instruction = `より優しく包み込むような温かい口調にリライトしてください。`;
+
+    const payload = {
+      contents: [
+        {
+          parts: [
+            {
+              text: `以下の通知表所見を、指示に従ってリライトしてください。\n【元の文章】\n${currentText}\n\n【指示】\n${instruction}\n「です・ます」調を維持し、修正後の本文のみを出力してください。`
+            }
+          ]
+        }
+      ]
+    };
+
+    try {
+      const data = await callGeminiWithRetry(payload);
+      const newText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+      if (newText) {
+        const updated = [...results];
+        updated[index].text = newText;
+        setResults(updated);
+      }
+    } catch (err) {
+      setErrorMessage("微調整中にエラーが発生しました。");
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans pb-16">
+      {/* ヘッダー */}
+      <header className="bg-emerald-700 text-white shadow-md sticky top-0 z-20">
+        <div className="max-w-6xl mx-auto px-4 py-3 sm:py-4 flex flex-wrap justify-between items-center gap-3">
+          <div className="flex items-center space-x-3">
+            <div className="p-2 bg-emerald-600 rounded-lg shadow-inner">
+              <BookOpen className="w-6 h-6 text-emerald-100" />
+            </div>
+            <div>
+              <h1 className="text-lg sm:text-xl font-bold tracking-tight">中学校 通知表 総合所見アシスタント</h1>
+              <p className="text-xs text-emerald-200">肯定的・建設的なリフレーミングで3通りの所見を即時作成</p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowDictionary(!showDictionary)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition ${
+                showDictionary 
+                  ? 'bg-amber-400 text-slate-900 shadow' 
+                  : 'bg-emerald-800/80 hover:bg-emerald-800 text-emerald-100'
+              }`}
+            >
+              <Lightbulb className="w-4 h-4 text-amber-300" />
+              <span>所見の言い換え辞書</span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* リフレーミング辞書モーダル/パネル */}
+      {showDictionary && (
+        <div className="bg-amber-50 border-b border-amber-200 shadow-inner px-4 py-5 animate-fadeIn">
+          <div className="max-w-6xl mx-auto">
+            <div className="flex justify-between items-center mb-3">
+              <div className="flex items-center gap-2">
+                <Lightbulb className="w-5 h-5 text-amber-600" />
+                <h2 className="font-bold text-slate-800 text-sm sm:text-base">
+                  ポジティブな所見作成のためのリフレーミング（言い換え）ヒント
+                </h2>
+              </div>
+              <button 
+                onClick={() => setShowDictionary(false)}
+                className="text-xs text-slate-500 hover:text-slate-800 underline"
+              >
+                閉じる
+              </button>
+            </div>
+            <p className="text-xs text-slate-600 mb-3">
+              課題面を記載する際は「〜ができない」と書くのではなく、本人の長所やこれからの可能性を伸ばす言葉選びを意識します。
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2.5">
+              {REFRAMING_TIPS.map((tip, idx) => (
+                <div key={idx} className="bg-white p-2.5 rounded-lg border border-amber-200 text-xs shadow-sm">
+                  <div className="text-red-600/90 font-medium mb-1 line-through decoration-red-400">
+                    {tip.negative}
+                  </div>
+                  <div className="flex items-start gap-1 text-emerald-800 font-medium">
+                    <ArrowRight className="w-3.5 h-3.5 text-emerald-600 mt-0.5 flex-shrink-0" />
+                    <span>{tip.positive}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* メインコンテンツ */}
+      <main className="max-w-6xl mx-auto px-4 mt-6">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          
+          {/* 左カラム：生徒情報入力フォーム (5 cols on lg) */}
+          <div className="lg:col-span-5 bg-white rounded-xl shadow-sm border border-slate-200 p-5 space-y-5">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center space-x-2">
+                <PenTool className="w-5 h-5 text-emerald-600" />
+                <h2 className="font-bold text-slate-800">生徒情報の入力</h2>
+              </div>
+              <button 
+                onClick={handleReset}
+                className="text-xs text-slate-400 hover:text-red-500 flex items-center gap-1 transition"
+                title="入力をクリア"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                クリア
+              </button>
+            </div>
+
+            {/* 学年 & 活動分類 */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1.5">学年</label>
+                <select
+                  value={grade}
+                  onChange={(e) => setGrade(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                >
+                  <option value="1">中学 1年生</option>
+                  <option value="2">中学 2年生</option>
+                  <option value="3">中学 3年生</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1.5">重点項目 / 分野</label>
+                <select
+                  value={category}
+                  onChange={(e) => setCategory(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                >
+                  <option value="委員会活動">委員会活動</option>
+                  <option value="係活動">係活動</option>
+                  <option value="学級・生活態度">学級生活・人間関係</option>
+                  <option value="学習・授業態度">学習・探究活動</option>
+                  <option value="部活動">部活動</option>
+                  <option value="学校行事">学校行事（体育祭/文化祭等）</option>
+                  <option value="総合的な学習">総合的な学習の時間</option>
+                  <option value="その他">その他（自由指定）</option>
+                </select>
+              </div>
+            </div>
+
+            {category === "その他" && (
+              <div>
+                <input
+                  type="text"
+                  placeholder="活動名や着目分野を入力（例: 校外学習、ボランティア）"
+                  value={customCategory}
+                  onChange={(e) => setCustomCategory(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                />
+              </div>
+            )}
+
+            {/* 文字数設定スライダー */}
+            <div>
+              <div className="flex justify-between items-center mb-1">
+                <label className="text-xs font-semibold text-slate-600">目標文字数</label>
+                <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                  約 {targetCharCount} 文字
+                </span>
+              </div>
+              <div className="flex items-center gap-3">
+                <input
+                  type="range"
+                  min="120"
+                  max="300"
+                  step="20"
+                  value={targetCharCount}
+                  onChange={(e) => setTargetCharCount(Number(e.target.value))}
+                  className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                />
+              </div>
+              <div className="flex justify-between text-[10px] text-slate-400 mt-1">
+                <span>短め (120字)</span>
+                <span>標準 (200字)</span>
+                <span>長め (300字)</span>
+              </div>
+            </div>
+
+            {/* プラス面（評価したい点） */}
+            <div>
+              <div className="flex justify-between items-center mb-1">
+                <label className="text-xs font-semibold text-emerald-800 flex items-center gap-1">
+                  <Award className="w-3.5 h-3.5 text-emerald-600" />
+                  プラス面（評価したい点・長所）
+                </label>
+              </div>
+              <textarea
+                rows={3}
+                value={positivePoint}
+                onChange={(e) => setPositivePoint(e.target.value)}
+                placeholder="例: 給食委員会で毎日の当番を欠かさず行い、周囲の仕事を自ら手伝う姿勢が見られた。"
+                className="w-full bg-slate-50 border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none placeholder:text-slate-400"
+              />
+              {/* クイックタグ */}
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {PRESET_TAGS.positive.slice(0, 4).map((tag, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => addTag('positive', tag)}
+                    className="text-[11px] bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 rounded px-2 py-0.5 transition"
+                  >
+                    + {tag}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* 課題面（励ましたい点） */}
+            <div>
+              <div className="flex justify-between items-center mb-1">
+                <label className="text-xs font-semibold text-blue-800 flex items-center gap-1">
+                  <Lightbulb className="w-3.5 h-3.5 text-blue-600" />
+                  課題面（励ましたい点・今後の期待）
+                </label>
+              </div>
+              <textarea
+                rows={2}
+                value={encouragementPoint}
+                onChange={(e) => setEncouragementPoint(e.target.value)}
+                placeholder="例: 自分の意見を言うのに遠慮がちなので、話し合いで積極的に発信してほしい。"
+                className="w-full bg-slate-50 border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none placeholder:text-slate-400"
+              />
+              {/* クイックタグ */}
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {PRESET_TAGS.encouragement.slice(0, 3).map((tag, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => addTag('encouragement', tag)}
+                    className="text-[11px] bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 rounded px-2 py-0.5 transition"
+                  >
+                    + {tag}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* 具体的なエピソード（任意） */}
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 mb-1">
+                具体的なエピソード・背景（任意）
+              </label>
+              <input
+                type="text"
+                value={episode}
+                onChange={(e) => setEpisode(e.target.value)}
+                placeholder="例: 合唱コンクールでパートリーダーとして声かけを頑張った"
+                className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none placeholder:text-slate-400"
+              />
+            </div>
+
+            {/* エラー表示 */}
+            {errorMessage && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-600 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
+                <span>{errorMessage}</span>
+              </div>
+            )}
+
+            {/* 生成ボタン */}
+            <button
+              onClick={handleGenerate}
+              disabled={isGenerating}
+              className={`w-full py-3 px-4 rounded-xl font-bold text-white shadow-md transition flex items-center justify-center gap-2 ${
+                isGenerating 
+                  ? 'bg-slate-400 cursor-not-allowed' 
+                  : 'bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] hover:shadow-lg'
+              }`}
+            >
+              {isGenerating ? (
+                <>
+                  <RefreshCw className="w-5 h-5 animate-spin" />
+                  <span>所見文を3パターン生成中...</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-5 h-5" />
+                  <span>3パターンの所見を生成する</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {/* 右カラム：生成結果表示 (7 cols on lg) */}
+          <div className="lg:col-span-7 space-y-4">
+            
+            {!results && !isGenerating && (
+              <div className="bg-white border-2 border-dashed border-slate-200 rounded-xl p-10 text-center text-slate-400">
+                <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-3 text-slate-300">
+                  <Sparkles className="w-8 h-8" />
+                </div>
+                <h3 className="font-bold text-slate-600 mb-1">所見案がここに表示されます</h3>
+                <p className="text-xs text-slate-400 max-w-sm mx-auto">
+                  左のフォームに生徒の様子や評価したい点を入力し、「3パターンの所見を生成する」ボタンを押してください。
+                </p>
+              </div>
+            )}
+
+            {isGenerating && (
+              <div className="bg-white rounded-xl p-8 border border-slate-200 text-center space-y-4 shadow-sm">
+                <div className="inline-block p-4 bg-emerald-50 rounded-full text-emerald-600 animate-pulse">
+                  <Sparkles className="w-8 h-8" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-700">丁寧な「です・ます」調で所見を作成中...</h3>
+                  <p className="text-xs text-slate-400 mt-1">生徒の成長を促す温かい表現にリフレーミングしています</p>
+                </div>
+                <div className="w-48 h-1.5 bg-slate-100 rounded-full overflow-hidden mx-auto">
+                  <div className="w-full h-full bg-emerald-500 animate-pulse"></div>
+                </div>
+              </div>
+            )}
+
+            {results && results.map((item, idx) => {
+              const charCount = item.text.length;
+              const isCloseToTarget = Math.abs(charCount - targetCharCount) <= 20;
+
+              return (
+                <div 
+                  key={idx} 
+                  className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden transition-all hover:border-emerald-300"
+                >
+                  {/* カードヘッダー */}
+                  <div className="bg-slate-50 px-4 py-2.5 border-b border-slate-200 flex flex-wrap justify-between items-center gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="w-5 h-5 bg-emerald-600 text-white text-xs font-bold rounded-full flex items-center justify-center">
+                        {idx + 1}
+                      </span>
+                      <span className="font-bold text-sm text-slate-800">{item.type}</span>
+                      <span className="text-xs text-slate-500 hidden sm:inline">| {item.subtitle}</span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <span className={`text-xs px-2 py-0.5 rounded font-mono font-medium ${
+                        isCloseToTarget 
+                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
+                          : 'bg-slate-100 text-slate-600'
+                      }`}>
+                        {charCount} 文字
+                      </span>
+
+                      <button
+                        onClick={() => handleCopy(item.text, idx)}
+                        className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded transition ${
+                          copiedIndex === idx
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-sm'
+                        }`}
+                        title="通知表にコピー"
+                      >
+                        {copiedIndex === idx ? (
+                          <>
+                            <Check className="w-3.5 h-3.5" />
+                            <span>コピー完了</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>コピー</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 本文（編集可能） */}
+                  <div className="p-4">
+                    <textarea
+                      rows={4}
+                      value={item.text}
+                      onChange={(e) => handleTextChange(idx, e.target.value)}
+                      className="w-full text-slate-700 text-sm leading-relaxed p-2 rounded-lg border border-transparent hover:border-slate-200 focus:border-emerald-500 focus:bg-slate-50/50 focus:outline-none resize-y transition"
+                    />
+
+                    {/* 微調整アクションバー */}
+                    <div className="mt-3 pt-2.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+                      <span className="flex items-center gap-1 text-[11px] text-slate-400">
+                        <Edit3 className="w-3 h-3" />
+                        直接修正・編集が可能です
+                      </span>
+
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] text-slate-400 mr-1">AI調整:</span>
+                        <button
+                          onClick={() => handleRefine(idx, 'shorten')}
+                          className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded transition"
+                        >
+                          短くする
+                        </button>
+                        <button
+                          onClick={() => handleRefine(idx, 'expand')}
+                          className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded transition"
+                        >
+                          具体化
+                        </button>
+                        <button
+                          onClick={() => handleRefine(idx, 'soften')}
+                          className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded transition"
+                        >
+                          より温かく
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+
+          </div>
+
+        </div>
+      </main>
+    </div>
+  );
+}
